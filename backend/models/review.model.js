@@ -30,6 +30,10 @@ const reviewSchema = new mongoose.Schema({
 // Compound index to prevent duplicate reviews from the same user for the same book
 reviewSchema.index({ bookId: 1, userId: 1 }, { unique: true });
 
+// OPTIMIZATION: Add standalone index on bookId for efficient review lookups by book
+// This improves performance when fetching all reviews for a book
+reviewSchema.index({ bookId: 1 });
+
 const Review = mongoose.model('Review', reviewSchema);
 
 export default Review;
