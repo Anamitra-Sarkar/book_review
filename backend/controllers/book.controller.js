@@ -154,26 +154,62 @@ export const getAllBooks = async (req, res) => {
     }
 
     // Normal sorting (publishedYear, createdAt, etc.)
+    // OPTIMIZED: Use aggregation pipeline to avoid N+1 query problem
+    // Previously, each book required a separate query for reviews
     const sortObj = {};
     sortObj[sortBy] = sortOrder;
 
-    const books = await Book.find(query)
-      .populate('addedBy', 'name email')
-      .sort(sortObj)
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const pipeline = [
+      { $match: query },
+      { $sort: sortObj },
+      { $skip: skip },
+      { $limit: limit },
+      {
+        $lookup: {
+          from: 'reviews',
+          localField: '_id',
+          foreignField: 'bookId',
+          as: 'reviews'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'addedBy',
+          foreignField: '_id',
+          as: 'addedByUser'
+        }
+      },
+      {
+        $addFields: {
+          averageRating: {
+            $cond: {
+              if: { $gt: [{ $size: '$reviews' }, 0] },
+              then: { $avg: '$reviews.rating' },
+              else: 0
+            }
+          },
+          addedBy: { $arrayElemAt: ['$addedByUser', 0] }
+        }
+      },
+      {
+        $project: {
+          title: 1,
+          author: 1,
+          description: 1,
+          genre: 1,
+          publishedYear: 1,
+          averageRating: 1,
+          createdAt: 1,
+          updatedAt: 1,
+          'addedBy._id': 1,
+          'addedBy.name': 1,
+          'addedBy.email': 1
+        }
+      }
+    ];
 
-    // Add average rating to each book
-    const booksWithRatings = await Promise.all(
-      books.map(async (book) => {
-        const reviews = await Review.find({ bookId: book._id });
-        const avgRating = reviews.length > 0
-          ? reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length
-          : 0;
-        return { ...book, averageRating: avgRating };
-      })
-    );
+    const booksWithRatings = await Book.aggregate(pipeline);
 
     res.status(200).json({
       success: true,
@@ -220,19 +256,17 @@ export const getBookById = async (req, res) => {
       .populate('userId', 'name email')
       .sort({ createdAt: -1 });
 
-    // Calculate average rating
-    const avgRating = reviews.length > 0
-      ? reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length
-      : 0;
-
-    // Calculate rating distribution
-    const ratingDistribution = {
-      1: reviews.filter(r => r.rating === 1).length,
-      2: reviews.filter(r => r.rating === 2).length,
-      3: reviews.filter(r => r.rating === 3).length,
-      4: reviews.filter(r => r.rating === 4).length,
-      5: reviews.filter(r => r.rating === 5).length
-    };
+    // Calculate average rating and rating distribution in a single pass
+    // OPTIMIZED: Previously used 5 separate filter operations
+    const ratingDistribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let totalRating = 0;
+    
+    for (const review of reviews) {
+      totalRating += review.rating;
+      ratingDistribution[review.rating]++;
+    }
+    
+    const avgRating = reviews.length > 0 ? totalRating / reviews.length : 0;
 
     res.status(200).json({
       success: true,
